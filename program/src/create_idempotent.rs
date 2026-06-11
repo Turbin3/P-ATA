@@ -1,10 +1,5 @@
-
 use pinocchio::{
-    AccountView, Address, ProgramResult,
-    cpi::Signer,
-    entrypoint,
-    error::ProgramError,
-    instruction::seeds,
+    AccountView, Address, ProgramResult, cpi::Signer, error::ProgramError, instruction::seeds,
 };
 
 use pinocchio_system::instructions::CreateAccountAllowPrefund;
@@ -13,9 +8,7 @@ use pinocchio_token_2022::state::{
     Account, ExtensionType, Mint, StateWithExtensions, try_calculate_account_len,
 };
 
-
 use crate::batch::batch_init_and_lock_owner;
-
 
 pub fn process_create_idempotent_instruction(
     program_id: &Address,
@@ -69,7 +62,6 @@ pub fn process_create_idempotent_instruction(
         return Err(ProgramError::IllegalOwner);
     }
 
-
     let is_spl_token = *spl_token_program_info.address() == pinocchio_token::ID;
     let account_len = if is_spl_token {
         Account::BASE_LEN as u64
@@ -79,15 +71,13 @@ pub fn process_create_idempotent_instruction(
         if mint_data.len() == Mint::BASE_LEN {
             TOKEN_2022_BASE_ACCOUNT_DATA_SIZE
         } else {
-
             let mut extensions = [ExtensionType::ImmutableOwner; 8];
             let mut ext_count: usize = 1;
 
             let mut offset = Mint::BASE_LEN + ACCOUNT_TYPE_SIZE;
 
             while offset + TLV_HEADER_LEN <= mint_data.len() {
-                let ext_type =
-                    u16::from_le_bytes([mint_data[offset], mint_data[offset + 1]]);
+                let ext_type = u16::from_le_bytes([mint_data[offset], mint_data[offset + 1]]);
                 let ext_len =
                     u16::from_le_bytes([mint_data[offset + 2], mint_data[offset + 3]]) as usize;
 
@@ -123,16 +113,22 @@ pub fn process_create_idempotent_instruction(
         bump_ref
     );
     let signer = Signer::from(&seeds);
-    CreateAccountAllowPrefund::with_minimum_balance(funder_info,
-    associated_token_account_info,
-    account_len,
-    spl_token_program_info.address(),
-    None)?
+    CreateAccountAllowPrefund::with_minimum_balance(
+        funder_info,
+        associated_token_account_info,
+        account_len,
+        spl_token_program_info.address(),
+        None,
+    )?
     .invoke_signed(&[signer])?;
 
-    if !is_spl_token{
-        batch_init_and_lock_owner( spl_token_program_info.address(), associated_token_account_info, spl_token_mint_info, wallet_account_info.address())?;
-
+    if !is_spl_token {
+        batch_init_and_lock_owner(
+            spl_token_program_info.address(),
+            associated_token_account_info,
+            spl_token_mint_info,
+            wallet_account_info.address(),
+        )?;
     } else {
         InitializeAccount3::new(
             associated_token_account_info,

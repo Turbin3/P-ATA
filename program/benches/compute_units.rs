@@ -11,7 +11,8 @@ use {
     solana_program_option::COption,
     solana_program_pack::Pack,
     solana_rent::Rent,
-    spl_token_interface::state::{Account as TokenAccount, AccountState, Mint}, std::path::PathBuf,
+    spl_token_interface::state::{Account as TokenAccount, AccountState, Mint},
+    std::path::PathBuf,
 };
 
 const PROGRAM_ID: Address = Address::new_from_array([1u8; 32]);
@@ -55,6 +56,135 @@ fn make_mint(token_program: &Address) -> (Address, Account) {
     )
 }
 
+fn make_token_account(
+    token_program: &Address,
+    mint: Address,
+    owner: Address,
+    amount: u64,
+) -> Account {
+    let rent = Rent::default();
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    Account {
+        lamports: rent.minimum_balance(TokenAccount::LEN),
+        data,
+        owner: *token_program,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+fn build_recover_nested_ix(
+    nested_ata: &Address,
+    nested_token_mint: &Address,
+    destination_ata: &Address,
+    owner_ata: &Address,
+    owner_token_mint: &Address,
+    wallet: &Address,
+    owner_token_program: &Address,
+    nested_token_program: &Address,
+) -> Instruction {
+    let mut accounts = vec![
+        AccountMeta::new(*nested_ata, false),
+        AccountMeta::new_readonly(*nested_token_mint, false),
+        AccountMeta::new(*destination_ata, false),
+        AccountMeta::new(*owner_ata, true),
+        AccountMeta::new_readonly(*owner_token_mint, false),
+        AccountMeta::new(*wallet, true),
+        AccountMeta::new_readonly(*owner_token_program, false),
+    ];
+
+    if nested_token_program != owner_token_program {
+        accounts.push(AccountMeta::new_readonly(*nested_token_program, false));
+    }
+
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts,
+        data: vec![2],
+    }
+}
+
+fn recover_nested(
+    owner_token_program_id: Address,
+    nested_token_program_id: Address,
+    spl_token_account: &(Address, Account),
+    t22_account: &(Address, Account),
+) -> (Instruction, Vec<(Address, Account)>) {
+    let wallet = Address::new_unique();
+
+    let (owner_mint, owner_mint_account) = make_mint(&owner_token_program_id);
+    let owner_ata = derive_ata(&wallet, &owner_mint, &owner_token_program_id);
+    let owner_ata_account = make_token_account(&owner_token_program_id, owner_mint, wallet, 0);
+
+    let (nested_mint, nested_mint_account) = make_mint(&nested_token_program_id);
+    let nested_ata = derive_ata(&owner_ata, &nested_mint, &nested_token_program_id);
+    let nested_ata_account =
+        make_token_account(&nested_token_program_id, nested_mint, owner_ata, 1000);
+
+    let destination_ata = derive_ata(&wallet, &nested_mint, &nested_token_program_id);
+    let destination_ata_account =
+        make_token_account(&nested_token_program_id, nested_mint, wallet, 0);
+
+    let mut accounts: Vec<(Address, Account)> = vec![
+        (nested_ata, nested_ata_account),
+        (nested_mint, nested_mint_account),
+        (destination_ata, destination_ata_account),
+        (owner_ata, owner_ata_account),
+        (owner_mint, owner_mint_account),
+        (
+            wallet,
+            Account {
+                lamports: 1_000_000_000,
+                data: vec![],
+                owner: SYSTEM_PROGRAM,
+                executable: false,
+                rent_epoch: 0,
+            },
+        ),
+    ];
+
+    if owner_token_program_id == spl_token_interface::id() {
+        accounts.push(spl_token_account.clone());
+    } else {
+        accounts.push(t22_account.clone());
+    }
+
+    if owner_token_program_id != nested_token_program_id {
+        if nested_token_program_id == spl_token_interface::id() {
+            accounts.push(spl_token_account.clone());
+        } else {
+            accounts.push(t22_account.clone());
+        }
+    }
+
+    let ix = build_recover_nested_ix(
+        &nested_ata,
+        &nested_mint,
+        &destination_ata,
+        &owner_ata,
+        &owner_mint,
+        &wallet,
+        &owner_token_program_id,
+        &nested_token_program_id,
+    );
+
+    (ix, accounts)
+}
+
 fn build_ix(
     funder: &Address,
     ata: &Address,
@@ -72,27 +202,27 @@ fn build_ix(
             AccountMeta::new_readonly(SYSTEM_PROGRAM, false),
             AccountMeta::new_readonly(*token_program, false),
         ],
-        data: vec![],
+        data: vec![1],
     }
 }
 
 fn main() {
     let mut mollusk = Mollusk::new(&PROGRAM_ID, "target/deploy/create_idempotent");
-    
-        let t22_elf_path = PathBuf::from("/Users/singupallikartik/Developer/pinocchio-working-group/p-ata/create-idempotent/benches/programs/spl_token_2022.so");
-            let t22_elf = mollusk_svm::file::read_file(t22_elf_path);
-            mollusk.add_program_with_loader_and_elf(
-                &spl_token_2022_interface::id(),
-                &mollusk_svm::program::loader_keys::LOADER_V3,
-                &t22_elf,
-            );
-            let t_elf_path = PathBuf::from("/Users/singupallikartik/Developer/pinocchio-working-group/p-ata/create-idempotent/benches/programs/pinocchio_token_program.so");
-                let t_elf = mollusk_svm::file::read_file(t_elf_path);
-                mollusk.add_program_with_loader_and_elf(
-                    &spl_token_interface::id(),
-                    &mollusk_svm::program::loader_keys::LOADER_V3,
-                    &t_elf,
-                );
+
+    let t22_elf_path = PathBuf::from("benches/programs/spl_token_2022.so");
+    let t22_elf = mollusk_svm::file::read_file(t22_elf_path);
+    mollusk.add_program_with_loader_and_elf(
+        &spl_token_2022_interface::id(),
+        &mollusk_svm::program::loader_keys::LOADER_V3,
+        &t22_elf,
+    );
+    let t_elf_path = PathBuf::from("benches/programs/pinocchio_token_program.so");
+    let t_elf = mollusk_svm::file::read_file(t_elf_path);
+    mollusk.add_program_with_loader_and_elf(
+        &spl_token_interface::id(),
+        &mollusk_svm::program::loader_keys::LOADER_V3,
+        &t_elf,
+    );
 
     let rent = Rent::default();
     let sys_acc = mollusk_svm::program::keyed_account_for_system_program();
@@ -183,7 +313,7 @@ fn main() {
         ),
         (mint, mint_acc),
         sys_acc.clone(),
-        tok_acc,
+        tok_acc.clone(),
     ];
     let spl_idempotent_ix = build_ix(&funder, &ata, &wallet, &mint, &token_program);
 
@@ -283,9 +413,39 @@ fn main() {
         ),
         (mint2, mint2_acc),
         sys_acc,
-        t22_acc,
+        t22_acc.clone(),
     ];
     let t22_idempotent_ix = build_ix(&funder2, &ata2, &wallet2, &mint2, &t22_program);
+
+    // Bench for Recover Nested
+
+    let (ix1, accs1) = recover_nested(
+        spl_token_interface::id(),
+        spl_token_interface::id(),
+        &tok_acc,
+        &t22_acc,
+    );
+
+    let (ix2, accs2) = recover_nested(
+        spl_token_2022_interface::id(),
+        spl_token_2022_interface::id(),
+        &tok_acc,
+        &t22_acc,
+    );
+
+    let (ix3, accs3) = recover_nested(
+        spl_token_interface::id(),
+        spl_token_2022_interface::id(),
+        &tok_acc,
+        &t22_acc,
+    );
+
+    let (ix4, accs4) = recover_nested(
+        spl_token_2022_interface::id(),
+        spl_token_interface::id(),
+        &tok_acc,
+        &t22_acc,
+    );
 
     // ─── Run benchmarks ──────────────────────────────────────────────
     MolluskComputeUnitBencher::new(mollusk)
@@ -301,7 +461,27 @@ fn main() {
             &t22_idempotent_ix,
             &t22_idempotent_accounts,
         ))
+        .bench((
+            "recover_nested (owner=spl-token, nested=spl-token)",
+            &ix1,
+            &accs1,
+        ))
+        .bench((
+            "recover_nested (owner=token-2022, nested=token-2022)",
+            &ix2,
+            &accs2,
+        ))
+        .bench((
+            "recover_nested (owner=spl-token, nested=token-2022)",
+            &ix3,
+            &accs3,
+        ))
+        .bench((
+            "recover_nested (owner=token-2022, nested=spl-token)",
+            &ix4,
+            &accs4,
+        ))
         .must_pass(true)
-        .out_dir("./benche")
+        .out_dir("./benches")
         .execute();
 }

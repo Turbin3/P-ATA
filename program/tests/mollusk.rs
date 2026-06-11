@@ -1,6 +1,3 @@
-// Tests for create-idempotent program using Mollusk
-// Follows https://solana.com/docs/programs/testing/mollusk
-
 use {
     mollusk_svm::{Mollusk, result::Check},
     mollusk_svm_programs_token::{token, token2022},
@@ -21,14 +18,14 @@ const SYSTEM_PROGRAM: Address = Address::new_from_array([
 fn setup_mollusk() -> Mollusk {
     let mut mollusk = Mollusk::new(&PROGRAM_ID, "target/deploy/create_idempotent");
 
-    let t22_elf_path = PathBuf::from("/Users/singupallikartik/Developer/pinocchio-working-group/p-ata/create-idempotent/benches/programs/spl_token_2022.so");
+    let t22_elf_path = PathBuf::from("benches/programs/spl_token_2022.so");
         let t22_elf = mollusk_svm::file::read_file(t22_elf_path);
         mollusk.add_program_with_loader_and_elf(
             &spl_token_2022_interface::id(),
             &mollusk_svm::program::loader_keys::LOADER_V3,
             &t22_elf,
         );
-        let t_elf_path = PathBuf::from("/Users/singupallikartik/Developer/pinocchio-working-group/p-ata/create-idempotent/benches/programs/pinocchio_token_program.so");
+        let t_elf_path = PathBuf::from("benches/programs/pinocchio_token_program.so");
             let t_elf = mollusk_svm::file::read_file(t_elf_path);
             mollusk.add_program_with_loader_and_elf(
                 &spl_token_interface::id(),
@@ -104,6 +101,38 @@ fn make_wallet() -> (Address, Account) {
     )
 }
 
+fn make_token_account(
+    token_program: &Address,
+    mint: Address,
+    owner: Address,
+    amount: u64,
+) -> Account {
+    let rent = Rent::default();
+    let mut data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner,
+            amount,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut data,
+    )
+    .unwrap();
+    Account {
+        lamports: rent.minimum_balance(TokenAccount::LEN),
+        data,
+        owner: *token_program,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+
 fn build_instruction(
     funder: &Address,
     ata: &Address,
@@ -121,7 +150,7 @@ fn build_instruction(
             AccountMeta::new_readonly(SYSTEM_PROGRAM, false), // 4: system program
             AccountMeta::new_readonly(*token_program, false), // 5: token program
         ],
-        data: vec![],
+        data: vec![1],
     }
 }
 
@@ -471,5 +500,196 @@ fn test_existing_ata_wrong_mint_fails() {
         &[Check::err(
             solana_program_error::ProgramError::InvalidAccountData,
         )],
+    );
+}
+
+// TESTS FOR RECOVER NESTED
+
+struct RecoverNestedSetup {
+    owner_ata: Address,
+    nested_ata: Address,
+    wallet: Address,
+    destination_ata: Address,
+    owner_mint: Address,
+    nested_mint: Address,
+    nested_ata_balance: u64,
+}
+
+fn recover_nested_ix(
+    nested_ata: &Address,
+    nested_token_mint: &Address,
+    destination_ata: &Address,
+    owner_ata: &Address,
+    owner_token_mint: &Address,
+    wallet: &Address,
+    owner_token_program: &Address,
+    nested_token_program: &Address,
+) -> Instruction {
+    let mut accounts = vec![
+        AccountMeta::new(*nested_ata, false),
+        AccountMeta::new_readonly(*nested_token_mint, false),
+        AccountMeta::new(*destination_ata, false),
+        AccountMeta::new(*owner_ata, false),
+        AccountMeta::new_readonly(*owner_token_mint, false),
+        AccountMeta::new(*wallet, true),
+        AccountMeta::new_readonly(*owner_token_program, false),
+    ];
+    if nested_token_program != owner_token_program {
+        accounts.push(AccountMeta::new_readonly(*nested_token_program, false));
+    }
+
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts,
+        data: vec![2],
+    }
+}
+
+fn recover_nested_setup(
+    owner_token_program: &Address,
+    nested_token_program: &Address,
+) -> (RecoverNestedSetup, Vec<(Address, Account)>) {
+    let wallet = Address::new_unique();
+    let wallet_account = Account {
+        lamports: 1_000_000_000,
+        data: vec![],
+        owner: SYSTEM_PROGRAM,
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let (owner_mint, owner_mint_account) = make_mint(owner_token_program);
+    let owner_ata = derive_ata(&wallet, &owner_mint, owner_token_program);
+    let owner_ata_account = make_token_account(owner_token_program, owner_mint, wallet, 0);
+
+    let (nested_mint, nested_mint_account) = make_mint(nested_token_program);
+    let nested_ata = derive_ata(&owner_ata, &nested_mint, nested_token_program);
+    let nested_ata_account = make_token_account(
+        nested_token_program,
+        nested_mint,
+        owner_ata,
+        1000,
+    );
+
+    let destination_ata = derive_ata(&wallet, &nested_mint, nested_token_program);
+    let destination_ata_account = make_token_account(nested_token_program, nested_mint, wallet, 0);
+
+    let nested_ata_balance = nested_ata_account.lamports;
+
+    let mut accounts: Vec<(Address, Account)> = vec![
+        (nested_ata, nested_ata_account),
+        (nested_mint, nested_mint_account),
+        (destination_ata, destination_ata_account),
+        (owner_ata, owner_ata_account),
+        (owner_mint, owner_mint_account),
+        (wallet, wallet_account),
+    ];
+
+    let (spl_token_prog, spl_token_prog_acc) = token::keyed_account();
+    let (t22_token_prog, t22_token_prog_acc) = token2022::keyed_account();
+
+    if *owner_token_program == spl_token_interface::id() {
+        accounts.push((spl_token_prog, spl_token_prog_acc.clone()));
+    } else {
+        accounts.push((t22_token_prog, t22_token_prog_acc.clone()));
+    }
+
+    // Add the nested token program account if different from owner
+    if nested_token_program != owner_token_program {
+        if *nested_token_program == spl_token_interface::id() {
+            accounts.push((spl_token_prog, spl_token_prog_acc));
+        } else {
+            accounts.push((t22_token_prog, t22_token_prog_acc));
+        }
+    }
+
+    let setup = RecoverNestedSetup {
+        wallet,
+        owner_mint,
+        nested_mint,
+        owner_ata,
+        nested_ata,
+        destination_ata,
+        nested_ata_balance,
+    };
+
+    (setup, accounts)
+}
+
+#[test]
+fn test_success_spl_token_both() {
+    let mollusk = setup_mollusk();
+    let owner_tp = spl_token_interface::id();
+    let nested_tp = spl_token_interface::id();
+
+    let (setup, accounts) = recover_nested_setup(&owner_tp, &nested_tp);
+    let wallet_lamports_before = accounts
+        .iter()
+        .find(|(a, _)| *a == setup.wallet)
+        .unwrap()
+        .1
+        .lamports;
+
+    let ix = recover_nested_ix(
+        &setup.nested_ata,
+        &setup.nested_mint,
+        &setup.destination_ata,
+        &setup.owner_ata,
+        &setup.owner_mint,
+        &setup.wallet,
+        &owner_tp,
+        &nested_tp,
+    );
+
+    mollusk.process_and_validate_instruction(
+        &ix,
+        &accounts,
+        &[
+            Check::success(),
+            Check::account(&setup.wallet)
+                .lamports(wallet_lamports_before + setup.nested_ata_balance)
+                .build(),
+            Check::account(&setup.nested_ata).lamports(0).build(),
+            Check::account(&setup.nested_ata).closed().build(),
+        ],
+    );
+}
+
+#[test]
+fn test_success_spl_and_token22_both() {
+    let mollusk = setup_mollusk();
+    let owner_tp = spl_token_interface::id();
+    let nested_tp = ::spl_token_2022_interface::id();
+
+    let (setup, accounts) = recover_nested_setup(&owner_tp, &nested_tp);
+    let wallet_lamports_before = accounts
+        .iter()
+        .find(|(a, _)| *a == setup.wallet)
+        .unwrap()
+        .1
+        .lamports;
+
+    let ix = recover_nested_ix(
+        &setup.nested_ata,
+        &setup.nested_mint,
+        &setup.destination_ata,
+        &setup.owner_ata,
+        &setup.owner_mint,
+        &setup.wallet,
+        &owner_tp,
+        &nested_tp,
+    );
+
+    mollusk.process_and_validate_instruction(
+        &ix,
+        &accounts,
+        &[
+            Check::success(),
+            Check::account(&setup.wallet)
+                .lamports(wallet_lamports_before + setup.nested_ata_balance)
+                .build(),
+            Check::account(&setup.nested_ata).lamports(0).build(),
+            Check::account(&setup.nested_ata).closed().build(),
+        ],
     );
 }

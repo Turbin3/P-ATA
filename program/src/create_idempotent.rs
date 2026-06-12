@@ -10,10 +10,34 @@ use pinocchio_token_2022::state::{
 
 use crate::batch::batch_init_and_lock_owner;
 
+/// `CreateIdempotent` ([1]): if a valid ATA already exists, succeed as a no-op.
 pub fn process_create_idempotent_instruction(
     program_id: &Address,
     accounts: &mut [AccountView],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    process_create(program_id, accounts, instruction_data, true)
+}
+
+/// `Create` ([] / [0]): create the ATA; fail if it already exists.
+pub fn process_create_instruction(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    process_create(program_id, accounts, instruction_data, false)
+}
+
+/// Shared handler for `Create` and `CreateIdempotent`.
+///
+/// The two instructions are identical except for how they treat an account that
+/// already exists: `CreateIdempotent` validates it and returns `Ok(())`, while
+/// `Create` falls through to the system-owner check below and fails.
+fn process_create(
+    program_id: &Address,
+    accounts: &mut [AccountView],
     _instruction_data: &[u8],
+    idempotent: bool,
 ) -> ProgramResult {
     let [
         funder_info,
@@ -41,8 +65,10 @@ pub fn process_create_idempotent_instruction(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // for normal create fn wrap it into if block
-    if associated_token_account_info.owner() == spl_token_program_info.address() {
+    // CreateIdempotent only: if a valid ATA already exists, succeed as a no-op.
+    // `Create` skips this and falls through to the system-owner check, which
+    // rejects any account that already exists.
+    if idempotent && associated_token_account_info.owner() == spl_token_program_info.address() {
         let ata_data = associated_token_account_info.try_borrow()?;
         if let Ok(associated_token_account_bytes) =
             StateWithExtensions::<Account>::from_bytes(&ata_data)

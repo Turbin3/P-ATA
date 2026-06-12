@@ -154,6 +154,30 @@ fn build_instruction(
     }
 }
 
+/// Same accounts as `build_instruction`, but lets the caller choose the
+/// instruction discriminator (`[]`/`[0]` = Create, `[1]` = CreateIdempotent).
+fn build_instruction_with_data(
+    funder: &Address,
+    ata: &Address,
+    wallet: &Address,
+    mint: &Address,
+    token_program: &Address,
+    data: Vec<u8>,
+) -> Instruction {
+    Instruction {
+        program_id: PROGRAM_ID,
+        accounts: vec![
+            AccountMeta::new(*funder, true),
+            AccountMeta::new(*ata, false),
+            AccountMeta::new_readonly(*wallet, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM, false),
+            AccountMeta::new_readonly(*token_program, false),
+        ],
+        data,
+    }
+}
+
 fn system_account() -> (Address, Account) {
     mollusk_svm::program::keyed_account_for_system_program()
 }
@@ -500,6 +524,107 @@ fn test_existing_ata_wrong_mint_fails() {
         &[Check::err(
             solana_program_error::ProgramError::InvalidAccountData,
         )],
+    );
+}
+
+// ─── TEST: Create (non-idempotent) creates a new ATA ─────────────────
+
+#[test]
+fn test_create_new_ata_spl_token_non_idempotent() {
+    let mollusk = setup_mollusk();
+    let token_program = spl_token_interface::id();
+
+    let (funder, funder_account) = make_funder();
+    let (wallet, wallet_account) = make_wallet();
+    let (mint, mint_account) = make_mint(&token_program);
+    let ata = derive_ata(&wallet, &mint, &token_program);
+
+    let accounts = vec![
+        (funder, funder_account),
+        (ata, Account::default()),
+        (wallet, wallet_account),
+        (mint, mint_account),
+        system_account(),
+        token_account(),
+    ];
+
+    // Empty data == Create discriminator
+    let ix = build_instruction_with_data(&funder, &ata, &wallet, &mint, &token_program, vec![]);
+
+    let result = mollusk.process_and_validate_instruction(
+        &ix,
+        &accounts,
+        &[
+            Check::success(),
+            Check::account(&ata)
+                .owner(&token_program)
+                .space(TokenAccount::LEN)
+                .rent_exempt()
+                .build(),
+        ],
+    );
+
+    let ata_acc = result.get_account(&ata).unwrap();
+    let token_acc = TokenAccount::unpack(&ata_acc.data).unwrap();
+    assert_eq!(token_acc.mint, mint);
+    assert_eq!(token_acc.owner, wallet);
+    assert_eq!(token_acc.amount, 0);
+}
+
+// ─── TEST: Create fails when the ATA already exists ──────────────────
+// This is the behavioural difference vs. CreateIdempotent, which would
+// return Ok(()) for the very same already-initialized account.
+
+#[test]
+fn test_create_fails_when_ata_exists() {
+    let mollusk = setup_mollusk();
+    let token_program = spl_token_interface::id();
+
+    let (funder, funder_account) = make_funder();
+    let (wallet, wallet_account) = make_wallet();
+    let (mint, mint_account) = make_mint(&token_program);
+    let ata = derive_ata(&wallet, &mint, &token_program);
+
+    // A valid, already-initialized ATA owned by the token program.
+    let rent = Rent::default();
+    let mut ata_data = vec![0u8; TokenAccount::LEN];
+    TokenAccount::pack(
+        TokenAccount {
+            mint,
+            owner: wallet,
+            amount: 0,
+            delegate: COption::None,
+            state: AccountState::Initialized,
+            is_native: COption::None,
+            delegated_amount: 0,
+            close_authority: COption::None,
+        },
+        &mut ata_data,
+    )
+    .unwrap();
+    let existing_ata = Account {
+        lamports: rent.minimum_balance(TokenAccount::LEN),
+        data: ata_data,
+        owner: token_program,
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let accounts = vec![
+        (funder, funder_account),
+        (ata, existing_ata),
+        (wallet, wallet_account),
+        (mint, mint_account),
+        system_account(),
+        token_account(),
+    ];
+
+    let ix = build_instruction_with_data(&funder, &ata, &wallet, &mint, &token_program, vec![0]);
+
+    mollusk.process_and_validate_instruction(
+        &ix,
+        &accounts,
+        &[Check::err(solana_program_error::ProgramError::IllegalOwner)],
     );
 }
 

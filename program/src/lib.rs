@@ -5,7 +5,7 @@ mod create_idempotent;
 mod recover_nested;
 
 use crate::{
-    create_idempotent::process_create_idempotent_instruction,
+    create_idempotent::{process_create_idempotent_instruction, process_create_instruction},
     recover_nested::process_recover_nested,
 };
 
@@ -17,7 +17,9 @@ pub fn process_instruction(
     instruction_data: &[u8],
 ) -> ProgramResult {
     match AssociatedTokenAccountInstruction::try_from_bytes(instruction_data)? {
-        AssociatedTokenAccountInstruction::Create => todo!(),
+        AssociatedTokenAccountInstruction::Create => {
+            process_create_instruction(program_id, accounts, instruction_data)
+        }
         AssociatedTokenAccountInstruction::CreateIdempotent => {
             process_create_idempotent_instruction(program_id, accounts, instruction_data)
         }
